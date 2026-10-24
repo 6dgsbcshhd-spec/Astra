@@ -1,0 +1,618 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>Astra Messenger</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script type="importmap">
+    {
+      "imports": {
+        "react": "https://esm.sh/react@18.2.0",
+        "react-dom/client": "https://esm.sh/react-dom@18.2.0/client",
+        "react-router-dom": "https://esm.sh/react-router-dom@6.22.0",
+        "framer-motion": "https://esm.sh/framer-motion@11.0.8",
+        "lucide-react": "https://esm.sh/lucide-react@0.330.0"
+      }
+    }
+  </script>
+  <style>
+    body { background-color: #F4F4F5; margin: 0; padding: 0; overflow: hidden; -webkit-tap-highlight-color: transparent; }
+    ::-webkit-scrollbar { display: none; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel" data-type="module" data-presets="react">
+    import React, { createContext, useContext, useState, useMemo, useEffect, useRef, useCallback } from 'react';
+    import { createRoot } from 'react-dom/client';
+    import { HashRouter, Routes, Route, Navigate, Link, Outlet, useParams, NavLink } from 'react-router-dom';
+    import { motion, AnimatePresence, useReducedMotion } from 'framer-motion';
+    import { 
+      Users, Phone, MessageCircle, Settings, ArrowLeft, Eye, EyeOff, Loader2, Rocket, 
+      Lock, Paperclip, Search, Send, Snowflake, Trash2, Video, X, Camera, FileText, 
+      Image, MapPin, Music, File, Check, MessageSquareText, Smile, Star, Upload, Zap, 
+      ChevronRight, LogOut, Palette, ShieldCheck, Smartphone, Ban, MinusSquare, Key, 
+      Timer, Mail, Clock, Image as ImageIcon, Forward, Mic, UserPlus, BatteryCharging, 
+      Globe, HelpCircle, Info, Lightbulb, Database
+    } from 'lucide-react';
+
+    // --- 1. УТИЛИТЫ И БЕЗОПАСНОСТЬ ---
+    const GB = 1024 ** 3;
+    const formatSize = (bytes) => {
+      const units = ['Б', 'КБ', 'МБ', 'ГБ']; let v = bytes; let i = 0;
+      while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+      return `${v >= 10 || i === 0 ? Math.round(v) : Number(v.toFixed(1))} ${units[i]}`;
+    };
+    const formatDuration = (s) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+    const formatTime = (ts) => new Date(ts).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
+    const formatDate = (ts) => new Date(ts).toLocaleDateString('ru-RU', { day: 'numeric', month: 'long', year: 'numeric' });
+
+    const toHex = (bytes) => [...bytes].map((b) => b.toString(16).padStart(2, '0')).join('');
+    const fromHex = (hex) => Uint8Array.from(hex.match(/../g) ?? [], (h) => parseInt(h, 16));
+    async function derive(secret, salt, iterations) {
+      const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(secret), 'PBKDF2', false, ['deriveBits']);
+      const bits = await crypto.subtle.deriveBits({ name: 'PBKDF2', hash: 'SHA-256', salt, iterations }, key, 256);
+      return new Uint8Array(bits);
+    }
+    async function hashSecret(secret) {
+      const salt = crypto.getRandomValues(new Uint8Array(16));
+      const hash = await derive(secret, salt, 600000);
+      return { salt: toHex(salt), hash: toHex(hash), iterations: 600000 };
+    }
+    async function verifySecret(secret, record) {
+      if (!record) return false;
+      const got = await derive(secret, fromHex(record.salt), record.iterations);
+      const want = fromHex(record.hash);
+      let diff = got.length ^ want.length;
+      for (let i = 0; i < got.length; i++) diff |= got[i] ^ (want[i] ?? 0);
+      return diff === 0;
+    }
+    const passwordStrength = (pw) => {
+      let score = 0; if (pw.length >= 8) score++; if (pw.length >= 12) score++;
+      if (/\p{Ll}/u.test(pw) && /\p{Lu}/u.test(pw)) score++; if (/\d/.test(pw) && /[^\p{L}\d]/u.test(pw)) score++;
+      return score;
+    };
+    const isPasswordAcceptable = (pw) => pw.length >= 8 && /\d/.test(pw) && /\p{L}/u.test(pw) && passwordStrength(pw) >= 2;
+    const isWeakCode = (c) => /^(\d)\1+$/.test(c) || '01234567890'.includes(c) || '09876543210'.includes(c);
+
+    // --- 2. КОНТЕКСТ ДАННЫХ ---
+    const CREATOR_PHONE = '+88888888888';
+    const CREATOR_PASSWORD_RECORD = { salt: 'bd547faecfa28a76e8b30efa06f1e9fc', hash: '3799464fda8279d68851e819210aa4a8f6c383f1478cc755a9bab53a0fdc05e0', iterations: 600000 };
+    const BAN_MESSAGE = 'Аккаунт заблокирован за нарушение правил';
+    const DEFAULT_GRADIENT = 'from-[#1C2B2D] to-[#1C2B2D]';
+    const GLOBAL_THEMES = [
+      { id: 'cosmic', name: 'Космическая', hint: 'Звёздный градиент', gradient: 'from-[#0B1020] via-[#1C2B2D] to-[#3B2A6B]' },
+      { id: 'winter', name: 'Зимняя', hint: 'Холодные оттенки', gradient: 'from-[#1C2B2D] via-[#2F5D6B] to-[#7FB5C4]' },
+    ];
+    const RESERVED_USERNAMES = ['creator', 'admin', 'administrator', 'astra', 'support', 'root', 'system', 'moderator'];
+    const LIMITS = { free: { upload: 2 * GB, pins: 5, folders: 10 }, premium: { upload: 4 * GB, pins: 10, folders: 20 } };
+    const PREMIUM_PLANS = [
+      { id: 'm1', label: '1 месяц', months: 1, price: 500 },
+      { id: 'm3', label: '3 месяца', months: 3, price: 1200, save: '20%' },
+      { id: 'y1', label: '12 месяцев', months: 12, price: 4000, save: '33%' },
+    ];
+    const isPremium = (u) => !!u?.premium && (!u.premiumUntil || u.premiumUntil > Date.now());
+    const PROFILE_FIELDS = ['name', 'bio', 'username', 'avatar'];
+    const base = { avatar: null, premiumUntil: null, status: 'active', role: 'user' };
+    const sms = { secretCode: null, password: null, passwordLogin: true, email: null };
+    const MOCK_USERS = [
+      { ...base, id: 'u_1001', role: 'creator', phone: CREATOR_PHONE, name: 'Создатель Astra', username: 'creator', bio: 'Не просто мессенджер, а безопасный космос возможностей', stars: 99999, premium: true, security: { ...sms, password: CREATOR_PASSWORD_RECORD } },
+      { ...base, id: 'u_1002', phone: '+79000000002', name: 'Алина Орлова', username: 'alina_orlova', bio: 'Дизайнер. Люблю ночные города', stars: 1200, premium: true, security: sms },
+      { ...base, id: 'u_1003', phone: '+79000000003', name: 'Максим Ветров', username: 'maxwind', bio: '', stars: 150, premium: false, security: sms },
+      { ...base, id: 'u_1004', phone: '+79000000004', name: 'Дарья Север', username: 'daria_s', bio: 'В пути', stars: 0, premium: false, status: 'frozen', security: sms },
+      { ...base, id: 'u_1005', phone: '+79000000005', name: 'Иван Косарев', username: 'kosarev', bio: '', stars: 40, premium: false, security: sms },
+      { ...base, id: 'u_1006', phone: '+79000000006', name: 'Spam Bot 77', username: 'spambot77', bio: 'Скидки!!!', stars: 0, premium: false, security: sms },
+    ];
+    const ago = (min) => Date.now() - min * 60_000;
+    const MOCK_CHATS = [
+      { id: 'c1', title: 'Алина Орлова', subtitle: 'в сети', messages: [
+        { id: 'm1', from: 'peer', type: 'text', text: 'Привет! Уже пробовала кружки в Astra?', at: ago(42) },
+        { id: 'm2', from: 'me', type: 'text', text: 'Да. Удерживаешь кнопку и говоришь, свайп вверх включает запись без рук.', at: ago(40) },
+      ] },
+      { id: 'c2', title: 'Команда Astra', subtitle: '5 участников', messages: [
+        { id: 'm4', from: 'peer', type: 'text', text: 'В пятницу релиз. Проверяем вложения.', at: ago(190) },
+      ] },
+      { id: 'c3', title: 'Избранное', subtitle: 'ваши заметки', messages: [] },
+    ];
+
+    const AstraContext = createContext(null);
+    const useAstra = () => useContext(AstraContext);
+
+    function AstraProvider({ children }) {
+      const [users, setUsers] = useState(MOCK_USERS);
+      const [sessionId, setSessionId] = useState(null);
+      const [globalTheme, setThemeState] = useState(null);
+      const [chats, setChats] = useState(MOCK_CHATS);
+
+      const value = useMemo(() => {
+        const me = users.find((u) => u.id === sessionId) ?? null;
+        const isCreator = me?.role === 'creator';
+        const patchUser = (id, patch) => setUsers((l) => l.map((u) => (u.id === id ? { ...u, ...patch } : u)));
+        const isUsernameFree = (name, exceptId) => {
+          const n = name.toLowerCase();
+          const owner = users.find((u) => u.username.toLowerCase() === n);
+          if (owner) return owner.id === exceptId;
+          return !RESERVED_USERNAMES.includes(n);
+        };
+        return {
+          me, users, chats, globalTheme, isUsernameFree,
+          findByPhone: (phone) => users.find((u) => u.phone === phone) ?? null,
+          login: (id) => setSessionId(id),
+          logout: () => setSessionId(null),
+          register: ({ phone, secretCode, password, email }) => {
+            if (users.some((u) => u.phone === phone)) return false;
+            let username; do { username = `user_${Math.random().toString(36).slice(2, 8)}`; } while (!isUsernameFree(username, null));
+            const id = `u_${Date.now()}`;
+            setUsers((l) => [...l, { ...base, id, phone, name: 'Новый пользователь', username, bio: '', stars: 0, premium: false, security: { secretCode, password, passwordLogin: true, email } }]);
+            setSessionId(id); return true;
+          },
+          updateProfile: (patch) => { if (!me) return; patchUser(me.id, Object.fromEntries(Object.entries(patch).filter(([k]) => PROFILE_FIELDS.includes(k)))); },
+          activatePremium: (planId) => {
+            const plan = PREMIUM_PLANS.find((p) => p.id === planId);
+            if (!me || !plan) return { ok: false, error: 'Тариф не найден' };
+            if (me.stars < plan.price) return { ok: false, error: `Не хватает ${(plan.price - me.stars).toLocaleString('ru-RU')} звёзд` };
+            const from = me.premiumUntil && me.premiumUntil > Date.now() ? me.premiumUntil : Date.now();
+            const until = new Date(from); until.setMonth(until.getMonth() + plan.months);
+            patchUser(me.id, { stars: me.stars - plan.price, premium: true, premiumUntil: until.getTime() });
+            return { ok: true, until: until.getTime() };
+          },
+          sendMessage: (chatId, msg) => {
+            if (me?.status !== 'active') return false;
+            const full = { ...msg, id: `m_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`, from: 'me', at: Date.now() };
+            setChats((l) => l.map((c) => (c.id === chatId ? { ...c, messages: [...c.messages, full] } : c)));
+            return true;
+          },
+          setStatus: (id, status) => { const target = users.find((u) => u.id === id); if (!isCreator || !target || target.role === 'creator') return; patchUser(id, { status }); },
+          grantStars: (id, amount) => { if (!isCreator) return; setUsers((l) => l.map((u) => (u.id === id ? { ...u, stars: u.stars + amount } : u))); },
+          setGlobalTheme: (id) => { if (isCreator) setThemeState(id); },
+        };
+      }, [users, sessionId, globalTheme, chats]);
+      return <AstraContext.Provider value={value}>{children}</AstraContext.Provider>;
+    }
+
+    // --- 3. ХУКИ И КОМПОНЕНТЫ UI ---
+    const NOTE_MAX_SECONDS = 120;
+    const LOCK_PX = 70;
+    const CANCEL_PX = 40;
+    function pickMime() {
+      const list = ['video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm', 'video/mp4'];
+      return list.find((m) => window.MediaRecorder?.isTypeSupported?.(m)) ?? '';
+    }
+    function useVideoNote(onComplete) {
+      const cb = useRef(onComplete); cb.current = onComplete; const ref = useRef({});
+      const [phase, setPhase] = useState('idle'); const [locked, setLocked] = useState(false);
+      const [cancelZone, setCancelZone] = useState(false); const [pull, setPull] = useState(0);
+      const [elapsed, setElapsed] = useState(0); const [stream, setStream] = useState(null); const [error, setError] = useState('');
+      const resetUi = useCallback(() => { setPhase('idle'); setLocked(false); setCancelZone(false); setPull(0); setElapsed(0); setStream(null); }, []);
+      const teardown = useCallback((s) => { clearInterval(s.timer); s.stream?.getTracks().forEach((t) => t.stop()); if (ref.current === s) { ref.current = {}; resetUi(); } }, [resetUi]);
+      const cancel = useCallback(() => { const s = ref.current; if (!s.active) return; s.discard = true; s.cancelled = true; if (s.recorder && s.recorder.state !== 'inactive') s.recorder.stop(); else teardown(s); }, [teardown]);
+      const finish = useCallback(() => { const s = ref.current; if (!s.active) return; if (s.recorder) { if (s.recorder.state !== 'inactive') s.recorder.stop(); } else s.wantFinish = true; }, []);
+      const start = useCallback(async (e, lockNow = false) => {
+        const cur = ref.current; if (cur.active) { if (cur.locked) finish(); return; }
+        if (e.pointerType === 'mouse' && e.button !== 0) return;
+        if (e.pointerId != null) e.currentTarget?.setPointerCapture?.(e.pointerId);
+        if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) { setError('Браузер не поддерживает запись.'); return; }
+        const startY = e.clientY || 0;
+        const s = (ref.current = { active: true, startY, locked: lockNow, chunks: [] });
+        setError(''); resetUi(); setPhase('starting'); if (lockNow) setLocked(true);
+        let media;
+        try { media = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user', width: { ideal: 480 }, height: { ideal: 480 } }, audio: true }); }
+        catch { if (ref.current === s) { teardown(s); setError('Нет доступа к камере.'); } return; }
+        if (ref.current !== s || s.cancelled) { media.getTracks().forEach((t) => t.stop()); return; }
+        if (s.wantFinish && !s.locked) { media.getTracks().forEach((t) => t.stop()); teardown(s); setError('Удерживайте кнопку.'); return; }
+        s.stream = media; setStream(media);
+        const mimeType = pickMime(); let rec;
+        try { rec = new MediaRecorder(media, mimeType ? { mimeType, videoBitsPerSecond: 1_000_000 } : undefined); }
+        catch { teardown(s); setError('Ошибка записи.'); return; }
+        s.recorder = rec; rec.ondataavailable = (ev) => { if (ev.data.size) s.chunks.push(ev.data); };
+        rec.onstop = () => {
+          const ms = Date.now() - s.startedAt; const { chunks, discard } = s; const type = rec.mimeType || mimeType || 'video/webm';
+          teardown(s); if (discard) return;
+          if (ms < 1000 || !chunks.length) { setError('Слишком короткий.'); return; }
+          cb.current({ url: URL.createObjectURL(new Blob(chunks, { type })), duration: Math.max(1, Math.round(ms / 1000)) });
+        };
+        rec.start(500); s.startedAt = Date.now(); setPhase('recording');
+        s.timer = setInterval(() => { const sec = Math.floor((Date.now() - s.startedAt) / 1000); setElapsed(sec); if (sec >= NOTE_MAX_SECONDS) finish(); }, 250);
+      }, [finish, resetUi, teardown]);
+      const move = useCallback((e) => {
+        const s = ref.current; if (!s.active || s.locked) return; const dy = s.startY - e.clientY;
+        setPull(Math.max(-CANCEL_PX, Math.min(LOCK_PX, dy)));
+        if (dy >= LOCK_PX) { s.locked = true; s.cancelZone = false; setLocked(true); setCancelZone(false); return; }
+        const inCancel = dy <= -CANCEL_PX; if (inCancel !== !!s.cancelZone) { s.cancelZone = inCancel; setCancelZone(inCancel); }
+      }, []);
+      const end = useCallback(() => { const s = ref.current; if (!s.active || s.locked) return; if (s.cancelZone) cancel(); else finish(); }, [cancel, finish]);
+      const abort = useCallback(() => { if (!ref.current.locked) cancel(); }, [cancel]);
+      const toggleHandsFree = useCallback(() => { if (ref.current.active) finish(); else start({}, true); }, [finish, start]);
+      useEffect(() => () => { const s = ref.current; if (!s.active) return; s.discard = true; s.cancelled = true; clearInterval(s.timer); if (s.recorder) { s.recorder.onstop = null; if (s.recorder.state !== 'inactive') s.recorder.stop(); } s.stream?.getTracks().forEach((t) => t.stop()); }, []);
+      return { phase, locked, cancelZone, pull, elapsed, stream, error, start, move, end, abort, cancel, finish, toggleHandsFree };
+    }
+
+    const AVATAR_COLORS = ['#3A6B6F', '#5B4B8A', '#8A4B5B', '#4B7A5B', '#7A6A3A', '#2F5D8A'];
+    const Avatar = ({ user, size = 48 }) => {
+      const style = { width: size, height: size, fontSize: size * 0.38 };
+      if (user.avatar) return <img src={user.avatar} alt="" style={style} className="rounded-full object-cover shrink-0" />;
+      const color = AVATAR_COLORS[Number(user.id.replace(/\D/g, '')) % AVATAR_COLORS.length];
+      const initials = user.name.split(' ').map((w) => w[0]).slice(0, 2).join('').toUpperCase();
+      return <div style={{ ...style, background: color }} className="rounded-full grid place-items-center font-semibold text-white shrink-0">{initials}</div>;
+    };
+    const UserName = ({ user, className = '' }) => (
+      <span className={`inline-flex items-center gap-1 min-w-0 ${className}`}>
+        <span className="truncate">{user.name}</span>
+        {isPremium(user) && <Star size={14} className="shrink-0 fill-amber-400 text-amber-400" aria-label="Premium" />}
+      </span>
+    );
+    const Screen = ({ children }) => <div className="h-screen max-w-md mx-auto bg-[#F4F4F5] overflow-y-auto shadow-2xl">{children}</div>;
+    const PageHeader = ({ title, backTo, right }) => (
+      <header className="sticky top-0 z-10 flex items-center gap-1 h-14 px-2 bg-[#F4F4F5]/90 backdrop-blur-md">
+        <Link to={backTo} aria-label="Назад" className="grid place-items-center w-10 h-10 rounded-full text-[#1C2B2D] active:bg-black/5"><ArrowLeft size={22} /></Link>
+        <h1 className="flex-1 text-lg font-semibold text-[#1C2B2D] truncate">{title}</h1>{right}
+      </header>
+    );
+    const MenuRow = ({ to, icon: Icon, label, hint, iconBg = '#1C2B2D' }) => (
+      <Link to={to} className="flex items-center gap-3 px-4 py-3 active:bg-gray-50">
+        <span className="grid place-items-center w-8 h-8 rounded-lg text-white" style={{ background: iconBg }}><Icon size={18} /></span>
+        <span className="flex-1 text-[15px] text-[#1C2B2D]">{label}</span>
+        {hint && <span className="text-sm text-gray-400">{hint}</span>}
+        <ChevronRight size={18} className="text-gray-300" />
+      </Link>
+    );
+
+    // --- 4. СТРАНИЦЫ (ЧАТЫ, НАСТРОЙКИ, ПРЕМИУМ, АДМИНКА, АВТОРИЗАЦИЯ) ---
+
+    function MessageBubble({ msg, query }) {
+      const mine = msg.from === 'me'; const side = mine ? 'justify-end' : 'justify-start';
+      const Highlight = ({ text }) => {
+        if (!query) return text;
+        const esc = query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        return text.split(new RegExp(`(${esc})`, 'ig')).map((part, i) => part.toLowerCase() === query.toLowerCase() ? <mark key={i} className="rounded px-0.5 bg-amber-200 text-inherit">{part}</mark> : part);
+      };
+      const VideoNote = ({ url, duration }) => {
+        const [sound, setSound] = useState(false);
+        return (
+          <button onClick={() => setSound((s) => !s)} className="relative w-44 h-44 rounded-full overflow-hidden bg-black">
+            <video src={url} autoPlay loop muted={!sound} playsInline className="w-full h-full object-cover" style={{ transform: 'scaleX(-1)' }} />
+            <span className="absolute left-3 bottom-3 px-1.5 py-0.5 rounded-full bg-black/55 text-white text-[11px]">{formatDuration(duration)}</span>
+            {!sound && <span className="absolute right-3 bottom-3 grid place-items-center w-6 h-6 rounded-full bg-black/55 text-white"><VolumeX size={13} /></span>}
+          </button>
+        );
+      };
+      const time = <span className={`self-end text-[11px] ${mine ? 'text-white/60' : 'text-gray-400'}`}>{formatTime(msg.at)}</span>;
+      if (msg.type === 'videoNote') return <div className={`flex ${side}`}><VideoNote url={msg.url} duration={msg.duration} /></div>;
+      let body;
+      switch (msg.type) {
+        case 'image': body = <img src={msg.url} alt="Фото" className="max-h-72 w-full rounded-xl object-cover" />; break;
+        case 'video': body = <video src={msg.url} controls playsInline className="max-h-72 w-full rounded-xl bg-black" />; break;
+        case 'file': body = <a href={msg.url} download={msg.name} className="flex items-center gap-3 min-w-0"><span className={`grid place-items-center w-11 h-11 rounded-full ${mine ? 'bg-white/15' : 'bg-[#1C2B2D]/10'}`}><FileText size={20} /></span><span className="min-w-0"><span className="block truncate text-[15px] font-medium"><Highlight text={msg.name} /></span><span className={`block text-xs ${mine ? 'text-white/60' : 'text-gray-400'}`}>{formatSize(msg.size)}</span></span></a>; break;
+        case 'audio': body = <div className="space-y-2 min-w-[14rem]"><div className="flex items-center gap-2 text-[15px] font-medium min-w-0"><Music size={18} /><span className="truncate"><Highlight text={msg.name} /></span></div><audio src={msg.url} controls className="w-full h-9" /></div>; break;
+        case 'location': body = <a href={`https://www.openstreetmap.org/?mlat=${msg.lat}&mlon=${msg.lng}`} target="_blank" className="flex items-center gap-3"><span className="grid place-items-center w-11 h-11 rounded-full bg-amber-100 text-amber-600"><MapPin size={20} /></span><span><span className="block text-[15px] font-medium">Геопозиция</span><span className={`block text-xs ${mine ? 'text-white/60' : 'text-gray-400'}`}>{msg.lat.toFixed(4)}, {msg.lng.toFixed(4)}</span></span></a>; break;
+        default: body = <p className="whitespace-pre-wrap break-words text-[15px]"><Highlight text={msg.text ?? ''} /></p>;
+      }
+      return <div className={`flex ${side}`}><div className={`flex flex-col gap-1 max-w-[80%] px-3 py-2 rounded-2xl ${mine ? 'bg-[#1C2B2D] text-white rounded-br-md' : 'bg-white text-[#1C2B2D] rounded-bl-md'}`}>{body}{time}</div></div>;
+    }
+
+    function AttachSheet({ open, onClose, onPick, uploadLimit }) {
+      useEffect(() => { if (!open) return; const onKey = (e) => e.key === 'Escape' && onClose(); window.addEventListener('keydown', onKey); return () => window.removeEventListener('keydown', onKey); }, [open, onClose]);
+      const ITEMS = [
+        { id: 'gallery', label: 'Галерея', icon: ImageIcon, color: '#2F5D8A' }, { id: 'camera', label: 'Камера', icon: Camera, color: '#8A4B5B' },
+        { id: 'file', label: 'Файл', icon: FileText, color: '#4B7A5B' }, { id: 'location', label: 'Геолокация', icon: MapPin, color: '#D99A1E' },
+        { id: 'audio', label: 'Звук', icon: Music, color: '#5B4B8A' },
+      ];
+      return (
+        <AnimatePresence>
+          {open && [
+            <motion.div key="backdrop" className="fixed inset-0 z-40 bg-black/30" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={onClose} />,
+            <motion.div key="sheet" className="fixed inset-x-0 bottom-0 z-50 mx-auto max-w-md rounded-t-3xl bg-white px-5 pt-3 pb-8" initial={{ y: '100%' }} animate={{ y: 0 }} exit={{ y: '100%' }} transition={{ type: 'spring', damping: 32, stiffness: 340 }} drag="y" dragConstraints={{ top: 0, bottom: 0 }} dragElastic={{ top: 0, bottom: 0.6 }} onDragEnd={(_, info) => { if (info.offset.y > 80 || info.velocity.y > 500) onClose(); }}>
+              <div className="mx-auto mb-5 h-1 w-10 rounded-full bg-gray-200" />
+              <div className="grid grid-cols-3 gap-y-5">
+                {ITEMS.map(({ id, label, icon: Icon, color }) => (
+                  <button key={id} onClick={() => onPick(id)} className="flex flex-col items-center gap-2 text-sm text-[#1C2B2D]">
+                    <span className="grid place-items-center w-14 h-14 rounded-full text-white" style={{ background: color }}><Icon size={24} /></span>{label}
+                  </button>
+                ))}
+              </div>
+              <p className="mt-6 text-center text-xs text-gray-400">Файлы до {formatSize(uploadLimit)}</p>
+            </motion.div>,
+          ]}
+        </AnimatePresence>
+      );
+    }
+
+    function Chat() {
+      const { chatId } = useParams(); const { chats, me, sendMessage } = useAstra();
+      const chat = chats.find((c) => c.id === chatId);
+      if (!chat) return <Navigate to="/chats" replace />;
+      const canWrite = me.status === 'active'; const uploadLimit = isPremium(me) ? LIMITS.premium.upload : LIMITS.free.upload;
+      const [text, setText] = useState(''); const [sheet, setSheet] = useState(false); const [searching, setSearching] = useState(false); const [query, setQuery] = useState(''); const [toast, setToast] = useState(null);
+      const mediaRef = useRef(null); const cameraRef = useRef(null); const fileRef = useRef(null); const audioRef = useRef(null); const taRef = useRef(null); const endRef = useRef(null);
+      const send = useCallback((msg) => { if (!sendMessage(chat.id, msg)) setToast({ text: 'Аккаунт заморожен: писать нельзя.' }); }, [sendMessage, chat.id]);
+      const vn = useVideoNote((note) => send({ type: 'videoNote', ...note })); const recording = vn.phase !== 'idle';
+      useEffect(() => { if (vn.error) setToast({ text: vn.error }); }, [vn.error]);
+      useEffect(() => { if (!toast) return; const t = setTimeout(() => setToast(null), 4500); return () => clearTimeout(t); }, [toast]);
+      const q = query.trim().toLowerCase(); const shown = useMemo(() => (q ? chat.messages.filter((m) => (m.text ?? m.name ?? '').toLowerCase().includes(q)) : chat.messages), [chat.messages, q]);
+      useEffect(() => { if (!q) endRef.current?.scrollIntoView({ block: 'end' }); }, [chat.messages.length, q]);
+      const submitText = () => { const t = text.trim(); if (!t) return; send({ type: 'text', text: t }); setText(''); if (taRef.current) taRef.current.style.height = 'auto'; };
+      const addFiles = (kind) => (e) => {
+        const files = [...e.target.files]; e.target.value = '';
+        for (const f of files) {
+          if (f.size > uploadLimit) { setToast({ text: `«${f.name}» больше ${formatSize(uploadLimit)}.`, premium: !isPremium(me) }); continue; }
+          const url = URL.createObjectURL(f); const meta = { url, name: f.name, size: f.size };
+          if (kind === 'audio') send({ type: 'audio', ...meta });
+          else if (kind === 'media' && f.type.startsWith('image/')) send({ type: 'image', ...meta });
+          else if (kind === 'media' && f.type.startsWith('video/')) send({ type: 'video', ...meta });
+          else send({ type: 'file', ...meta });
+        }
+      };
+      const shareLocation = () => {
+        if (!navigator.geolocation) { setToast({ text: 'Нет геолокации.' }); return; }
+        navigator.geolocation.getCurrentPosition((p) => send({ type: 'location', lat: p.coords.latitude, lng: p.coords.longitude, accuracy: Math.round(p.coords.accuracy) }), () => setToast({ text: 'Не удалось получить геопозицию.' }));
+      };
+      const onPick = (kind) => { setSheet(false); if (kind === 'gallery') mediaRef.current?.click(); if (kind === 'camera') cameraRef.current?.click(); if (kind === 'file') fileRef.current?.click(); if (kind === 'audio') audioRef.current?.click(); if (kind === 'location') shareLocation(); };
+      const hasText = text.trim().length > 0; const lockProgress = Math.max(0, Math.min(1, vn.pull / LOCK_PX));
+      const hint = vn.locked ? 'Запись идёт. Нажмите «Отправить»' : vn.cancelZone ? 'Отпустите, чтобы отменить' : vn.phase === 'starting' ? 'Включаем камеру…' : 'Вверх: закрепить. Вниз: отмена';
+
+      return (
+        <div className="relative flex flex-col h-[100dvh] max-w-md mx-auto bg-[#F4F4F5] shadow-2xl">
+          <header className="flex items-center gap-2 h-14 px-2 bg-white/90 border-b border-gray-200">
+            {searching ? (
+              <><Search size={18} className="ml-2 text-gray-400" /><input autoFocus value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Поиск" className="flex-1 bg-transparent outline-none" /><button onClick={() => { setSearching(false); setQuery(''); }} className="p-2"><X size={20} /></button></>
+            ) : (
+              <><Link to="/chats" className="p-2"><ArrowLeft size={22} /></Link><Avatar user={{ id: chat.id, name: chat.title, avatar: null }} size={36} /><div className="flex-1 min-w-0"><div className="truncate font-semibold text-[#1C2B2D]">{chat.title}</div><div className="truncate text-xs text-gray-400">{chat.subtitle}</div></div><button onClick={() => setSearching(true)} className="p-2"><Search size={20} /></button></>
+            )}
+          </header>
+          <div className="flex-1 overflow-y-auto px-3 py-3 space-y-2">
+            {shown.map((m) => <MessageBubble key={m.id} msg={m} query={q} />)}
+            {!shown.length && <p className="pt-16 text-center text-sm text-gray-400">{q ? 'Ничего не нашли.' : 'Сообщений пока нет.'}</p>}
+            <div ref={endRef} />
+          </div>
+          <AnimatePresence>
+            {toast && <motion.div initial={{ y: -12, opacity: 0 }} animate={{ y: 0, opacity: 1 }} exit={{ opacity: 0 }} className="absolute inset-x-4 top-16 z-30 rounded-2xl bg-[#1C2B2D] px-4 py-3 text-sm text-white shadow-lg">{toast.text}</motion.div>}
+          </AnimatePresence>
+          <div className="relative z-20 px-3 pt-2 pb-3 bg-white/90 border-t border-gray-200">
+            {!canWrite ? <p className="text-center text-sm text-sky-700">Аккаунт заморожен: писать нельзя</p> : (
+              <div className="flex items-end gap-2">
+                {recording ? (vn.locked ? <button onClick={vn.cancel} className="p-2 bg-red-50 text-red-500 rounded-full"><Trash2 size={20} /></button> : null) : <button onClick={() => setSheet(true)} className="p-2 text-[#1C2B2D]"><Paperclip size={22} /></button>}
+                {recording ? (
+                  <div className="flex flex-1 items-center gap-2 h-11 px-4 rounded-full bg-gray-100 text-sm"><span className={`w-2.5 h-2.5 rounded-full ${vn.cancelZone ? 'bg-gray-400' : 'bg-red-500 animate-pulse'}`} /><span className="font-medium text-[#1C2B2D]">{formatDuration(vn.elapsed)} / {formatDuration(NOTE_MAX_SECONDS)}</span><span className="ml-auto text-xs text-gray-500">{hint}</span></div>
+                ) : (
+                  <textarea ref={taRef} value={text} rows={1} placeholder="Сообщение" onChange={(e) => setText(e.target.value)} onInput={(e) => { e.target.style.height = 'auto'; e.target.style.height = `${Math.min(e.target.scrollHeight, 112)}px`; }} onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submitText(); } }} className="flex-1 max-h-28 resize-none rounded-2xl bg-gray-100 px-4 py-2.5 text-[15px] outline-none" />
+                )}
+                {hasText && !recording ? <button onClick={submitText} className="p-3 bg-[#1C2B2D] text-white rounded-full"><Send size={20} /></button> : (
+                  <button type="button" onPointerDown={vn.start} onPointerMove={vn.move} onPointerUp={vn.end} onPointerCancel={vn.abort} onContextMenu={(e) => e.preventDefault()} style={{ touchAction: 'none' }} className={`p-3 rounded-full text-white ${recording && !vn.locked ? 'bg-red-500 scale-125' : 'bg-[#1C2B2D]'}`}>{vn.locked ? <Send size={20} /> : <Video size={20} />}</button>
+                )}
+              </div>
+            )}
+          </div>
+          <AttachSheet open={sheet} onClose={() => setSheet(false)} onPick={onPick} uploadLimit={uploadLimit} />
+          <input ref={mediaRef} type="file" accept="image/*,video/*" multiple hidden onChange={addFiles('media')} />
+          <input ref={cameraRef} type="file" accept="image/*" capture="environment" hidden onChange={addFiles('media')} />
+          <input ref={fileRef} type="file" multiple hidden onChange={addFiles('file')} />
+          <input ref={audioRef} type="file" accept="audio/*" multiple hidden onChange={addFiles('audio')} />
+        </div>
+      );
+    }
+
+    function ChatList() {
+      const { chats } = useAstra();
+      const LABEL = { image: 'Фото', video: 'Видео', file: 'Файл', audio: 'Звук', location: 'Геопозиция', videoNote: 'Кружок' };
+      const preview = (m) => { if (!m) return 'Сообщений пока нет'; const body = m.type === 'text' ? m.text : m.name ? `${LABEL[m.type]}: ${m.name}` : LABEL[m.type]; return m.from === 'me' ? `Вы: ${body}` : body; };
+      return (
+        <div className="px-4 pt-6 pb-4">
+          <h1 className="text-2xl font-semibold text-[#1C2B2D]">Чаты</h1>
+          <ul className="mt-4 bg-white rounded-2xl divide-y divide-gray-100 overflow-hidden">
+            {chats.map((c) => {
+              const last = c.messages.at(-1);
+              return (
+                <li key={c.id}><Link to={`/chats/${c.id}`} className="flex items-center gap-3 px-4 py-3 active:bg-gray-50"><Avatar user={{ id: c.id, name: c.title, avatar: null }} size={48} /><span className="flex-1 min-w-0"><span className="block truncate text-[15px] font-medium text-[#1C2B2D]">{c.title}</span><span className="block truncate text-sm text-gray-500">{preview(last)}</span></span>{last && <span className="self-start pt-1 text-xs text-gray-400">{formatTime(last.at)}</span>}</Link></li>
+              );
+            })}
+          </ul>
+        </div>
+      );
+    }
+
+    function Settings() {
+      const { me, globalTheme, logout } = useAstra();
+      const gradient = GLOBAL_THEMES.find((t) => t.id === globalTheme)?.gradient ?? DEFAULT_GRADIENT;
+      return (
+        <div className="px-4 pt-6 pb-4 space-y-4">
+          <h1 className="text-2xl font-semibold text-[#1C2B2D]">Настройки</h1>
+          <Link to="/settings/profile" className={`block rounded-3xl p-5 text-white bg-gradient-to-br ${gradient}`}>
+            <div className="flex items-center gap-4"><Avatar user={me} size={64} /><div className="min-w-0 flex-1"><UserName user={me} className="text-lg font-semibold" /><div className="text-sm text-white/70">@{me.username}</div></div><ChevronRight className="text-white/60" /></div>
+            {me.bio && <p className="mt-3 text-sm text-white/80">{me.bio}</p>}
+          </Link>
+          <div className="bg-white rounded-2xl divide-y divide-gray-100 overflow-hidden">
+            <MenuRow to="/settings/devices" icon={Smartphone} iconBg="#2F5D8A" label="Устройства" hint="3 сессии" />
+            <MenuRow to="/settings/privacy" icon={Lock} iconBg="#4B7A5B" label="Конфиденциальность" />
+            <MenuRow to="/settings/appearance" icon={Palette} iconBg="#8A4B5B" label="Темы оформления" />
+          </div>
+          <div className="bg-white rounded-2xl divide-y divide-gray-100 overflow-hidden">
+            <MenuRow to="/settings/premium" icon={Star} iconBg="#D99A1E" label="Astra Premium" hint={isPremium(me) ? 'Активен' : `${me.stars} звёзд`} />
+            {me.role === 'creator' && <MenuRow to="/admin" icon={ShieldCheck} label="Панель Создателя" />}
+          </div>
+          <button onClick={logout} className="flex w-full items-center gap-3 rounded-2xl bg-white px-4 py-3 text-[15px] text-red-500 active:bg-gray-50"><LogOut size={20} />Выйти</button>
+        </div>
+      );
+    }
+
+    function ProfileEdit() {
+      const { me, updateProfile, isUsernameFree } = useAstra();
+      const [name, setName] = useState(me.name); const [bio, setBio] = useState(me.bio || ''); const [username, setUsername] = useState(me.username); const [avatar, setAvatar] = useState(me.avatar);
+      const fileRef = useRef(null);
+      const handleAvatar = (e) => { const file = e.target.files[0]; if (file) { const reader = new FileReader(); reader.onload = (ev) => setAvatar(ev.target.result); reader.readAsDataURL(file); } };
+      const usernameFree = isUsernameFree(username, me.id); const canSave = name.trim().length > 0 && usernameFree && username.length >= 3;
+      const save = () => { if (!canSave) return; updateProfile({ name: name.trim(), bio: bio.trim(), username: username.toLowerCase(), avatar }); };
+      return (
+        <Screen>
+          <PageHeader title="Мой профиль" backTo="/settings" right={<button onClick={save} disabled={!canSave} className="px-4 py-1.5 rounded-full bg-[#1C2B2D] text-white text-sm font-medium disabled:opacity-40">Сохранить</button>} />
+          <div className="p-4 space-y-6">
+            <div className="flex flex-col items-center gap-3">
+              <div onClick={() => fileRef.current.click()} className="cursor-pointer relative group"><Avatar user={{ ...me, avatar }} size={100} /><div className="absolute inset-0 bg-black/40 rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"><span className="text-white text-xs font-medium">Изменить</span></div></div>
+              <input type="file" accept="image/*" hidden ref={fileRef} onChange={handleAvatar} />
+            </div>
+            <div className="bg-white rounded-2xl p-4 space-y-4">
+              <div><label className="text-xs text-gray-500 font-medium ml-2">Имя</label><input value={name} onChange={(e) => setName(e.target.value)} className="w-full h-11 px-3 mt-1 bg-gray-50 rounded-xl outline-none focus:ring-2 focus:ring-[#1C2B2D]" /></div>
+              <div><label className="text-xs text-gray-500 font-medium ml-2">О себе</label><input value={bio} onChange={(e) => setBio(e.target.value)} placeholder="Пара слов о вас" className="w-full h-11 px-3 mt-1 bg-gray-50 rounded-xl outline-none focus:ring-2 focus:ring-[#1C2B2D]" /></div>
+              <div>
+                <label className="text-xs text-gray-500 font-medium ml-2">Имя пользователя</label>
+                <div className="relative mt-1"><span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400">@</span><input value={username} onChange={(e) => setUsername(e.target.value.replace(/[^a-zA-Z0-9_]/g, ''))} className={`w-full h-11 pl-8 pr-10 rounded-xl outline-none focus:ring-2 ${usernameFree ? 'bg-gray-50 focus:ring-[#1C2B2D]' : 'bg-red-50 focus:ring-red-500 text-red-600'}`} /><span className="absolute right-3 top-1/2 -translate-y-1/2">{username.length > 0 && (usernameFree ? <Check size={18} className="text-emerald-500" /> : <X size={18} className="text-red-500" />)}</span></div>
+                {!usernameFree && <p className="text-xs text-red-500 mt-1 ml-2">Занят</p>}
+              </div>
+            </div>
+          </div>
+        </Screen>
+      );
+    }
+
+    function Premium() {
+      const { me, activatePremium } = useAstra(); const [planId, setPlanId] = useState('m3'); const [notice, setNotice] = useState(null);
+      const plan = PREMIUM_PLANS.find((p) => p.id === planId); const active = isPremium(me); const missing = Math.max(0, plan.price - me.stars);
+      useEffect(() => { if (!notice) return; const t = setTimeout(() => setNotice(null), 4000); return () => clearTimeout(t); }, [notice]);
+      const buy = () => { const res = activatePremium(planId); setNotice(res.ok ? { ok: true, text: `Premium до ${formatDate(res.until)}` } : { ok: false, text: res.error }); };
+      const FEATURES = [
+        { icon: Upload, color: '#2F5D8A', title: `Файлы до ${formatSize(LIMITS.premium.upload)}` }, { icon: Smile, color: '#8A4B5B', title: 'Эксклюзивные стикеры' },
+        { icon: Zap, color: '#D99A1E', title: 'Быстрая загрузка' }, { icon: MessageSquareText, color: '#4B7A5B', title: 'Управление чатами' }, { icon: Star, color: '#5B4B8A', title: 'Значок Premium' },
+      ];
+      return (
+        <Screen>
+          <PageHeader title="Astra Premium" backTo="/settings" />
+          <div className="px-4 pb-4 space-y-4">
+            <section className="rounded-3xl p-6 text-center text-white bg-gradient-to-br from-[#0B1020] via-[#1C2B2D] to-[#3B2A6B]"><Star size={56} className="mx-auto fill-amber-400 text-amber-400" /><h2 className="mt-3 text-2xl font-semibold">Astra Premium</h2><p className="mt-1 text-sm text-white/70">Космос без границ</p>{active && <p className="mt-3 text-sm text-amber-300">Активен</p>}</section>
+            <ul className="bg-white rounded-2xl divide-y divide-gray-100 overflow-hidden">{FEATURES.map(({ icon: Icon, color, title }) => <li key={title} className="flex items-center gap-3 px-4 py-3"><span className="grid place-items-center w-9 h-9 rounded-xl text-white shrink-0" style={{ background: color }}><Icon size={18} /></span><span className="text-[15px] font-medium text-[#1C2B2D]">{title}</span></li>)}</ul>
+            <div className="space-y-2">{PREMIUM_PLANS.map((p) => { const on = p.id === planId; return <button key={p.id} onClick={() => setPlanId(p.id)} className={`flex w-full items-center gap-3 rounded-2xl bg-white p-4 text-left ring-2 ${on ? 'ring-[#1C2B2D]' : 'ring-transparent'}`}><span className={`grid place-items-center w-5 h-5 rounded-full border-2 ${on ? 'border-[#1C2B2D] bg-[#1C2B2D] text-white' : 'border-gray-300'}`}>{on && <Check size={12} />}</span><span className="flex-1 font-medium text-[#1C2B2D]">{p.label}</span><span className="font-semibold text-[#1C2B2D]">{p.price} <Star size={14} className="inline fill-amber-400 text-amber-400" /></span></button>; })}</div>
+            <p className="text-center text-sm text-gray-500">Баланс: {me.stars} звёзд</p>
+          </div>
+          <div className="sticky bottom-0 px-4 pt-3 pb-6 bg-[#F4F4F5]"><button onClick={buy} disabled={missing > 0} className="flex h-12 w-full items-center justify-center rounded-2xl bg-[#1C2B2D] font-medium text-white disabled:opacity-40">{missing > 0 ? `Не хватает ${missing} звёзд` : `Купить за ${plan.price} звёзд`}</button></div>
+          <AnimatePresence>{notice && <motion.div initial={{ y: -12, opacity: 0 }} animate={{ y: 0, opacity: 1 }} exit={{ opacity: 0 }} className={`fixed top-4 inset-x-4 mx-auto max-w-sm rounded-2xl px-4 py-3 text-sm text-white ${notice.ok ? 'bg-emerald-600' : 'bg-red-600'}`}>{notice.text}</motion.div>}</AnimatePresence>
+        </Screen>
+      );
+    }
+
+    function Admin() {
+      const { me, users, setStatus, grantStars, setGlobalTheme, globalTheme } = useAstra(); const [tab, setTab] = useState('users'); const [query, setQuery] = useState(''); const [openId, setOpenId] = useState(null);
+      if (me?.role !== 'creator') return <Navigate to="/chats" replace />;
+      const found = useMemo(() => { const q = query.trim().replace(/^@/, '').toLowerCase(); if (!q) return users; return users.filter((u) => u.username.toLowerCase().includes(q) || u.id.toLowerCase().includes(q)); }, [users, query]);
+      const btn = 'flex items-center justify-center gap-1.5 h-11 rounded-xl text-sm font-medium transition-colors disabled:opacity-40';
+      return (
+        <Screen>
+          <PageHeader title="Панель Создателя" backTo="/settings" right={<ShieldCheck size={20} className="mr-3 text-[#1C2B2D]" />} />
+          <div className="px-4 pb-10 space-y-4">
+            <div className="grid grid-cols-2 p-1 bg-black/5 rounded-xl">{['users', 'themes'].map((id) => <button key={id} onClick={() => setTab(id)} className={`h-9 text-sm font-medium rounded-lg ${tab === id ? 'bg-white shadow-sm text-[#1C2B2D]' : 'text-gray-500'}`}>{id === 'users' ? 'Пользователи' : 'Темы'}</button>)}</div>
+            {tab === 'users' ? (
+              <div className="space-y-3">
+                <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="@username или ID" className="w-full h-11 px-3 rounded-xl bg-white outline-none" />
+                <ul className="bg-white rounded-2xl divide-y divide-gray-100 overflow-hidden">
+                  {found.map((u) => (
+                    <li key={u.id}>
+                      <button onClick={() => setOpenId(openId === u.id ? null : u.id)} className="w-full flex items-center gap-3 px-4 py-3 text-left"><Avatar user={u} size={40} /><span className="flex-1 min-w-0"><UserName user={u} className="text-[15px] font-medium text-[#1C2B2D]" /><span className="block text-xs text-gray-400">@{u.username}</span></span><span className={`text-xs px-2 py-0.5 rounded-full ${u.status === 'active' ? 'bg-emerald-50 text-emerald-700' : u.status === 'frozen' ? 'bg-sky-50 text-sky-700' : 'bg-red-50 text-red-600'}`}>{u.status}</span></button>
+                      <AnimatePresence>{openId === u.id && (
+                        <motion.div initial={{ height: 0 }} animate={{ height: 'auto' }} exit={{ height: 0 }} className="overflow-hidden">
+                          <div className="px-4 pb-4 space-y-3 bg-[#FAFAFA]">
+                            <div className="pt-3 text-sm text-gray-500 flex items-center gap-2"><Star size={16} className="fill-amber-400 text-amber-400" />Баланс: {u.stars}</div>
+                            <div className="flex gap-2"><input id={`stars_${u.id}`} type="number" placeholder="Звёзды" className="flex-1 h-11 px-3 rounded-xl bg-white border border-gray-200 outline-none" /><button onClick={() => { const v = Number(document.getElementById(`stars_${u.id}`).value); if (v > 0) grantStars(u.id, v); }} className={`${btn} px-4 bg-[#1C2B2D] text-white`}>Начислить</button></div>
+                            {u.role !== 'creator' && (
+                              <div className="grid grid-cols-2 gap-2">
+                                <button onClick={() => setStatus(u.id, u.status === 'frozen' ? 'active' : 'frozen')} disabled={u.status === 'banned'} className={`${btn} bg-sky-50 text-sky-700`}><Snowflake size={16} />{u.status === 'frozen' ? 'Разморозить' : 'Заморозить'}</button>
+                                <button onClick={() => setStatus(u.id, u.status === 'banned' ? 'active' : 'banned')} className={`${btn} ${u.status === 'banned' ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-600'}`}><Ban size={16} />{u.status === 'banned' ? 'Разбанить' : 'Забанить'}</button>
+                              </div>
+                            )}
+                          </div>
+                        </motion.div>
+                      )}</AnimatePresence>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ) : (
+              <div className="space-y-3">{GLOBAL_THEMES.map((t) => { const on = globalTheme === t.id; return <div key={t.id} className="bg-white rounded-2xl p-3 flex items-center gap-3"><div className={`w-14 h-14 rounded-xl bg-gradient-to-br ${t.gradient}`} /><div className="flex-1 font-medium text-[#1C2B2D]">{t.name}</div><button onClick={() => setGlobalTheme(on ? null : t.id)} className={`h-9 px-3 rounded-full text-sm font-medium ${on ? 'bg-gray-100' : 'bg-[#1C2B2D] text-white'}`}>{on ? 'Выкл' : 'Вкл'}</button></div>; })}</div>
+            )}
+          </div>
+        </Screen>
+      );
+    }
+
+    function Auth() {
+      const { findByPhone, login, register } = useAstra();
+      const [step, setStep] = useState('phone'); const [phone, setPhone] = useState(''); const [code, setCode] = useState(''); const [secret, setSecret] = useState(''); const [password, setPassword] = useState(''); const [email, setEmail] = useState('');
+      const [error, setError] = useState('');
+      const primary = 'flex h-12 w-full items-center justify-center gap-2 rounded-2xl bg-[#1C2B2D] font-medium text-white disabled:opacity-40';
+      const field = 'flex items-center gap-2 h-12 px-4 rounded-2xl bg-white ring-1 ring-gray-200 focus-within:ring-[#1C2B2D]';
+      
+      const handlePhone = () => { if (phone.length < 10) return setError('Введите номер'); const user = findByPhone(phone); if (user) { setStep('code'); } else setError('Пользователь не найден. Введите +88888888888'); };
+      const handleCode = () => { if (code !== '12345') return setError('Неверный код (демо: 12345)'); setError(''); if (findByPhone(phone)) { setStep('login'); } else setStep('secret'); };
+      const handleSecret = () => { if (secret.length !== 6) return setError('Код из 6 цифр'); setStep('password'); };
+      const handlePassword = () => { if (password.length < 8) return setError('Минимум 8 символов'); setStep('email'); };
+      const handleEmail = () => { register({ phone, secretCode: secret, password, email }); };
+
+      return (
+        <div className="h-screen max-w-md mx-auto bg-[#F4F4F5] p-6 space-y-6">
+          <div className="flex items-center gap-2 justify-center pt-10"><Rocket size={24} className="text-[#1C2B2D]" /><h1 className="text-2xl font-bold text-[#1C2B2D]">Astra</h1></div>
+          {error && <p className="text-red-500 text-sm text-center bg-red-50 p-2 rounded-xl">{error}</p>}
+          
+          {step === 'phone' && <div className="space-y-4"><h2 className="text-xl font-semibold text-center">Ваш номер</h2><label className={field}><input value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="+7 999 123-45-67" className="flex-1 bg-transparent outline-none" /></label><button onClick={handlePhone} className={primary}>Продолжить</button><p className="text-xs text-gray-400 text-center">Демо номер: +88888888888</p></div>}
+          {step === 'code' && <div className="space-y-4"><h2 className="text-xl font-semibold text-center">Введите код</h2><label className={field}><input value={code} onChange={(e) => setCode(e.target.value)} placeholder="12345" className="flex-1 bg-transparent outline-none tracking-widest text-center text-xl" maxLength={5} /></label><button onClick={handleCode} className={primary}>Войти</button></div>}
+          {step === 'login' && <div className="space-y-4"><h2 className="text-xl font-semibold text-center">Облачный пароль</h2><label className={field}><input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Пароль создателя" className="flex-1 bg-transparent outline-none" /></label><button onClick={() => { if (password === 'admin') login(findByPhone(phone).id); else setError('Неверный пароль'); }} className={primary}>Войти</button><p className="text-xs text-gray-400 text-center">Демо пароль: admin</p></div>}
+          {step === 'secret' && <div className="space-y-4"><h2 className="text-xl font-semibold text-center">Секретный код</h2><p className="text-sm text-gray-500 text-center">Для удаления всех сессий. Запомните!</p><label className={field}><input type="password" value={secret} onChange={(e) => setSecret(e.target.value)} placeholder="6 цифр" className="flex-1 bg-transparent outline-none tracking-widest text-center" maxLength={6} /></label><button onClick={handleSecret} className={primary}>Далее</button></div>}
+          {step === 'password' && <div className="space-y-4"><h2 className="text-xl font-semibold text-center">Пароль</h2><label className={field}><input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Минимум 8 символов" className="flex-1 bg-transparent outline-none" /></label><button onClick={handlePassword} className={primary}>Далее</button></div>}
+          {step === 'email' && <div className="space-y-4"><h2 className="text-xl font-semibold text-center">Почта</h2><label className={field}><input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="mail@example.com" className="flex-1 bg-transparent outline-none" /></label><button onClick={handleEmail} className={primary}>Зарегистрироваться</button></div>}
+        </div>
+      );
+    }
+
+    // --- 5. КАРКАС И РОУТИНГ ---
+    function MainLayout() {
+      const navItems = [{ path: '/contacts', icon: Users, label: 'Контакты' }, { path: '/calls', icon: Phone, label: 'Звонки' }, { path: '/chats', icon: MessageCircle, label: 'Чаты' }, { path: '/settings', icon: Settings, label: 'Настройки' }];
+      return (
+        <div className="flex flex-col h-screen max-w-md mx-auto bg-[#F4F4F5] relative shadow-2xl overflow-hidden">
+          <div className="flex-1 overflow-y-auto pb-20"><Outlet /></div>
+          <div className="absolute bottom-4 left-4 right-4 bg-white/90 backdrop-blur-md rounded-3xl shadow-lg border border-gray-200 flex justify-around py-3 px-2 z-50">
+            {navItems.map((item) => <NavLink key={item.path} to={item.path} className={({ isActive }) => `flex flex-col items-center gap-1 w-16 ${isActive ? 'text-[#1C2B2D]' : 'text-gray-400'}`}><item.icon size={22} strokeWidth={2.5} /><span className="text-[10px] font-medium">{item.label}</span></NavLink>)}
+          </div>
+        </div>
+      );
+    }
+
+    const TabStub = ({ title }) => <div className="px-4 pt-6"><h1 className="text-2xl font-semibold text-[#1C2B2D]">{title}</h1><p className="mt-6 text-center text-sm text-gray-400">Скоро здесь будет раздел.</p></div>;
+
+    const RequireAuth = () => { const { me } = useAstra(); return me ? <Outlet /> : <Navigate to="/auth" replace />; };
+    const StatusGate = ({ children }) => {
+      const { me, logout } = useAstra();
+      if (me?.status === 'banned') return <div className="mx-auto grid h-screen max-w-md place-items-center bg-[#F4F4F5] px-8 text-center"><div><Ban size={48} className="mx-auto text-red-500" /><h1 className="mt-4 text-xl font-semibold text-[#1C2B2D]">{BAN_MESSAGE}</h1><button onClick={logout} className="mt-8 text-sm text-gray-500 underline">Выйти</button></div></div>;
+      return <>{me?.status === 'frozen' && <div className="fixed inset-x-0 top-0 z-50 mx-auto flex max-w-md items-center justify-center gap-1.5 bg-sky-600 py-1.5 text-xs text-white"><Snowflake size={14} />Только чтение</div>}{children}</>;
+    };
+
+    function AppRoutes() {
+      const { me } = useAstra();
+      return (
+        <StatusGate>
+          <Routes>
+            <Route path="auth" element={me ? <Navigate to="/chats" replace /> : <Auth />} />
+            <Route element={<RequireAuth />}>
+              <Route element={<MainLayout />}>
+                <Route index element={<Navigate to="/chats" replace />} />
+                <Route path="chats" element={<ChatList />} />
+                <Route path="contacts" element={<TabStub title="Контакты" />} />
+                <Route path="calls" element={<TabStub title="Звонки" />} />
+                <Route path="settings" element={<Settings />} />
+              </Route>
+              <Route path="chats/:chatId" element={<Chat />} />
+              <Route path="settings/profile" element={<ProfileEdit />} />
+              <Route path="settings/premium" element={<Premium />} />
+              <Route path="settings/:section" element={<TabStub title="Раздел" />} />
+              <Route path="admin" element={<Admin />} />
+            </Route>
+            <Route path="*" element={<Navigate to="/chats" replace />} />
+          </Routes>
+        </StatusGate>
+      );
+    }
+
+    function App() {
+      return <AstraProvider><HashRouter><AppRoutes /></HashRouter></AstraProvider>;
+    }
+
+    createRoot(document.getElementById('root')).render(<App />);
+  </script>
+</body>
+</html>
