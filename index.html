@@ -28,14 +28,12 @@
     import React, { createContext, useContext, useState, useMemo, useEffect, useRef, useCallback } from 'react';
     import { createRoot } from 'react-dom/client';
     import { HashRouter, Routes, Route, Navigate, Link, Outlet, useParams, NavLink } from 'react-router-dom';
-    import { motion, AnimatePresence, useReducedMotion } from 'framer-motion';
+    import { motion, AnimatePresence } from 'framer-motion';
     import { 
       Users, Phone, MessageCircle, Settings, ArrowLeft, Eye, EyeOff, Loader2, Rocket, 
       Lock, Paperclip, Search, Send, Snowflake, Trash2, Video, X, Camera, FileText, 
-      Image, MapPin, Music, File, Check, MessageSquareText, Smile, Star, Upload, Zap, 
-      ChevronRight, LogOut, Palette, ShieldCheck, Smartphone, Ban, MinusSquare, Key, 
-      Timer, Mail, Clock, Image as ImageIcon, Forward, Mic, UserPlus, BatteryCharging, 
-      Globe, HelpCircle, Info, Lightbulb, Database
+      Image as ImageIcon, MapPin, Music, File, Check, MessageSquareText, Smile, Star, Upload, Zap, 
+      ChevronRight, LogOut, Palette, ShieldCheck, Smartphone, Ban, VolumeX, Clock
     } from 'lucide-react';
 
     // --- 1. УТИЛИТЫ И БЕЗОПАСНОСТЬ ---
@@ -51,30 +49,20 @@
 
     const toHex = (bytes) => [...bytes].map((b) => b.toString(16).padStart(2, '0')).join('');
     const fromHex = (hex) => Uint8Array.from(hex.match(/../g) ?? [], (h) => parseInt(h, 16));
+    
     async function derive(secret, salt, iterations) {
+      if (!crypto.subtle) throw new Error("Браузер не поддерживает криптографию (нужен HTTPS)");
       const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(secret), 'PBKDF2', false, ['deriveBits']);
       const bits = await crypto.subtle.deriveBits({ name: 'PBKDF2', hash: 'SHA-256', salt, iterations }, key, 256);
       return new Uint8Array(bits);
     }
+    
     async function hashSecret(secret) {
       const salt = crypto.getRandomValues(new Uint8Array(16));
       const hash = await derive(secret, salt, 600000);
       return { salt: toHex(salt), hash: toHex(hash), iterations: 600000 };
     }
-    async function verifySecret(secret, record) {
-      if (!record) return false;
-      const got = await derive(secret, fromHex(record.salt), record.iterations);
-      const want = fromHex(record.hash);
-      let diff = got.length ^ want.length;
-      for (let i = 0; i < got.length; i++) diff |= got[i] ^ (want[i] ?? 0);
-      return diff === 0;
-    }
-    const passwordStrength = (pw) => {
-      let score = 0; if (pw.length >= 8) score++; if (pw.length >= 12) score++;
-      if (/\p{Ll}/u.test(pw) && /\p{Lu}/u.test(pw)) score++; if (/\d/.test(pw) && /[^\p{L}\d]/u.test(pw)) score++;
-      return score;
-    };
-    const isPasswordAcceptable = (pw) => pw.length >= 8 && /\d/.test(pw) && /\p{L}/u.test(pw) && passwordStrength(pw) >= 2;
+    
     const isWeakCode = (c) => /^(\d)\1+$/.test(c) || '01234567890'.includes(c) || '09876543210'.includes(c);
 
     // --- 2. КОНТЕКСТ ДАННЫХ ---
@@ -176,19 +164,23 @@
     const NOTE_MAX_SECONDS = 120;
     const LOCK_PX = 70;
     const CANCEL_PX = 40;
+    
     function pickMime() {
       const list = ['video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm', 'video/mp4'];
       return list.find((m) => window.MediaRecorder?.isTypeSupported?.(m)) ?? '';
     }
+    
     function useVideoNote(onComplete) {
       const cb = useRef(onComplete); cb.current = onComplete; const ref = useRef({});
       const [phase, setPhase] = useState('idle'); const [locked, setLocked] = useState(false);
       const [cancelZone, setCancelZone] = useState(false); const [pull, setPull] = useState(0);
       const [elapsed, setElapsed] = useState(0); const [stream, setStream] = useState(null); const [error, setError] = useState('');
+      
       const resetUi = useCallback(() => { setPhase('idle'); setLocked(false); setCancelZone(false); setPull(0); setElapsed(0); setStream(null); }, []);
       const teardown = useCallback((s) => { clearInterval(s.timer); s.stream?.getTracks().forEach((t) => t.stop()); if (ref.current === s) { ref.current = {}; resetUi(); } }, [resetUi]);
       const cancel = useCallback(() => { const s = ref.current; if (!s.active) return; s.discard = true; s.cancelled = true; if (s.recorder && s.recorder.state !== 'inactive') s.recorder.stop(); else teardown(s); }, [teardown]);
       const finish = useCallback(() => { const s = ref.current; if (!s.active) return; if (s.recorder) { if (s.recorder.state !== 'inactive') s.recorder.stop(); } else s.wantFinish = true; }, []);
+      
       const start = useCallback(async (e, lockNow = false) => {
         const cur = ref.current; if (cur.active) { if (cur.locked) finish(); return; }
         if (e.pointerType === 'mouse' && e.button !== 0) return;
@@ -216,17 +208,20 @@
         rec.start(500); s.startedAt = Date.now(); setPhase('recording');
         s.timer = setInterval(() => { const sec = Math.floor((Date.now() - s.startedAt) / 1000); setElapsed(sec); if (sec >= NOTE_MAX_SECONDS) finish(); }, 250);
       }, [finish, resetUi, teardown]);
+      
       const move = useCallback((e) => {
         const s = ref.current; if (!s.active || s.locked) return; const dy = s.startY - e.clientY;
         setPull(Math.max(-CANCEL_PX, Math.min(LOCK_PX, dy)));
         if (dy >= LOCK_PX) { s.locked = true; s.cancelZone = false; setLocked(true); setCancelZone(false); return; }
         const inCancel = dy <= -CANCEL_PX; if (inCancel !== !!s.cancelZone) { s.cancelZone = inCancel; setCancelZone(inCancel); }
       }, []);
+      
       const end = useCallback(() => { const s = ref.current; if (!s.active || s.locked) return; if (s.cancelZone) cancel(); else finish(); }, [cancel, finish]);
       const abort = useCallback(() => { if (!ref.current.locked) cancel(); }, [cancel]);
-      const toggleHandsFree = useCallback(() => { if (ref.current.active) finish(); else start({}, true); }, [finish, start]);
+      
       useEffect(() => () => { const s = ref.current; if (!s.active) return; s.discard = true; s.cancelled = true; clearInterval(s.timer); if (s.recorder) { s.recorder.onstop = null; if (s.recorder.state !== 'inactive') s.recorder.stop(); } s.stream?.getTracks().forEach((t) => t.stop()); }, []);
-      return { phase, locked, cancelZone, pull, elapsed, stream, error, start, move, end, abort, cancel, finish, toggleHandsFree };
+      
+      return { phase, locked, cancelZone, pull, elapsed, stream, error, start, move, end, abort, cancel, finish };
     }
 
     const AVATAR_COLORS = ['#3A6B6F', '#5B4B8A', '#8A4B5B', '#4B7A5B', '#7A6A3A', '#2F5D8A'];
@@ -237,12 +232,14 @@
       const initials = user.name.split(' ').map((w) => w[0]).slice(0, 2).join('').toUpperCase();
       return <div style={{ ...style, background: color }} className="rounded-full grid place-items-center font-semibold text-white shrink-0">{initials}</div>;
     };
+    
     const UserName = ({ user, className = '' }) => (
       <span className={`inline-flex items-center gap-1 min-w-0 ${className}`}>
         <span className="truncate">{user.name}</span>
         {isPremium(user) && <Star size={14} className="shrink-0 fill-amber-400 text-amber-400" aria-label="Premium" />}
       </span>
     );
+    
     const Screen = ({ children }) => <div className="h-screen max-w-md mx-auto bg-[#F4F4F5] overflow-y-auto shadow-2xl">{children}</div>;
     const PageHeader = ({ title, backTo, right }) => (
       <header className="sticky top-0 z-10 flex items-center gap-1 h-14 px-2 bg-[#F4F4F5]/90 backdrop-blur-md">
@@ -259,8 +256,7 @@
       </Link>
     );
 
-    // --- 4. СТРАНИЦЫ (ЧАТЫ, НАСТРОЙКИ, ПРЕМИУМ, АДМИНКА, АВТОРИЗАЦИЯ) ---
-
+    // --- 4. СТРАНИЦЫ ---
     function MessageBubble({ msg, query }) {
       const mine = msg.from === 'me'; const side = mine ? 'justify-end' : 'justify-start';
       const Highlight = ({ text }) => {
@@ -336,7 +332,7 @@
       const addFiles = (kind) => (e) => {
         const files = [...e.target.files]; e.target.value = '';
         for (const f of files) {
-          if (f.size > uploadLimit) { setToast({ text: `«${f.name}» больше ${formatSize(uploadLimit)}.`, premium: !isPremium(me) }); continue; }
+          if (f.size > uploadLimit) { setToast({ text: `«${f.name}» больше ${formatSize(uploadLimit)}.` }); continue; }
           const url = URL.createObjectURL(f); const meta = { url, name: f.name, size: f.size };
           if (kind === 'audio') send({ type: 'audio', ...meta });
           else if (kind === 'media' && f.type.startsWith('image/')) send({ type: 'image', ...meta });
@@ -449,10 +445,10 @@
           <div className="p-4 space-y-6">
             <div className="flex flex-col items-center gap-3">
               <div onClick={() => fileRef.current.click()} className="cursor-pointer relative group"><Avatar user={{ ...me, avatar }} size={100} /><div className="absolute inset-0 bg-black/40 rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"><span className="text-white text-xs font-medium">Изменить</span></div></div>
-              <input type="file" accept="image/*" hidden ref={fileRef} onChange={handleAvatar} />
+              <input type="file" accept="image/*" hidden ref={fileRef} onChange={(()handleAvatar} />
             </div>
-            <div className="bg-white rounded-2xl p-4 space-y-4">
-              <div><label className="text-xs text-gray-500 font-medium ml-2">Имя</label><input value={name} onChange={(e) => setName(e.target.value)} className="w-full h-11 px-3 mt-1 bg-gray-50 rounded-xl outline-none focus:ring-2 focus:ring-[#1C2B2D]" /></div>
+            < =>div className="bg-white rounded-2xl p set-4 space-y-4">
+             Notice <div(null),><label className="text-xs text-gray-500 font-medium ml-2">Имя</label><input value={name} onChange={(e) => setName(e.target.value)} className="w-full h-11 px-3 mt-1 bg-gray-50 rounded-xl outline-none focus:ring-2 focus:ring-[#1C2B2D]" /></div>
               <div><label className="text-xs text-gray-500 font-medium ml-2">О себе</label><input value={bio} onChange={(e) => setBio(e.target.value)} placeholder="Пара слов о вас" className="w-full h-11 px-3 mt-1 bg-gray-50 rounded-xl outline-none focus:ring-2 focus:ring-[#1C2B2D]" /></div>
               <div>
                 <label className="text-xs text-gray-500 font-medium ml-2">Имя пользователя</label>
@@ -468,7 +464,7 @@
     function Premium() {
       const { me, activatePremium } = useAstra(); const [planId, setPlanId] = useState('m3'); const [notice, setNotice] = useState(null);
       const plan = PREMIUM_PLANS.find((p) => p.id === planId); const active = isPremium(me); const missing = Math.max(0, plan.price - me.stars);
-      useEffect(() => { if (!notice) return; const t = setTimeout(() => setNotice(null), 4000); return () => clearTimeout(t); }, [notice]);
+      useEffect(() => { if (!notice) return; const t = setTimeout 4000); return () => clearTimeout(t); }, [notice]);
       const buy = () => { const res = activatePremium(planId); setNotice(res.ok ? { ok: true, text: `Premium до ${formatDate(res.until)}` } : { ok: false, text: res.error }); };
       const FEATURES = [
         { icon: Upload, color: '#2F5D8A', title: `Файлы до ${formatSize(LIMITS.premium.upload)}` }, { icon: Smile, color: '#8A4B5B', title: 'Эксклюзивные стикеры' },
@@ -544,6 +540,14 @@
       const handleSecret = () => { if (secret.length !== 6) return setError('Код из 6 цифр'); setStep('password'); };
       const handlePassword = () => { if (password.length < 8) return setError('Минимум 8 символов'); setStep('email'); };
       const handleEmail = () => { register({ phone, secretCode: secret, password, email }); };
+      const handleLogin = () => {
+        const user = findByPhone(phone);
+        if (user && password === 'admin') {
+           login(user.id);
+        } else {
+           setError('Неверный пароль (демо: admin)');
+        }
+      };
 
       return (
         <div className="h-screen max-w-md mx-auto bg-[#F4F4F5] p-6 space-y-6">
@@ -552,7 +556,7 @@
           
           {step === 'phone' && <div className="space-y-4"><h2 className="text-xl font-semibold text-center">Ваш номер</h2><label className={field}><input value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="+7 999 123-45-67" className="flex-1 bg-transparent outline-none" /></label><button onClick={handlePhone} className={primary}>Продолжить</button><p className="text-xs text-gray-400 text-center">Демо номер: +88888888888</p></div>}
           {step === 'code' && <div className="space-y-4"><h2 className="text-xl font-semibold text-center">Введите код</h2><label className={field}><input value={code} onChange={(e) => setCode(e.target.value)} placeholder="12345" className="flex-1 bg-transparent outline-none tracking-widest text-center text-xl" maxLength={5} /></label><button onClick={handleCode} className={primary}>Войти</button></div>}
-          {step === 'login' && <div className="space-y-4"><h2 className="text-xl font-semibold text-center">Облачный пароль</h2><label className={field}><input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Пароль создателя" className="flex-1 bg-transparent outline-none" /></label><button onClick={() => { if (password === 'admin') login(findByPhone(phone).id); else setError('Неверный пароль'); }} className={primary}>Войти</button><p className="text-xs text-gray-400 text-center">Демо пароль: admin</p></div>}
+          {step === 'login' && <div className="space-y-4"><h2 className="text-xl font-semibold text-center">Облачный пароль</h2><label className={field}><input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Пароль создателя" className="flex-1 bg-transparent outline-none" /></label><button onClick={handleLogin} className={primary}>Войти</button><p className="text-xs text-gray-400 text-center">Демо пароль: admin</p></div>}
           {step === 'secret' && <div className="space-y-4"><h2 className="text-xl font-semibold text-center">Секретный код</h2><p className="text-sm text-gray-500 text-center">Для удаления всех сессий. Запомните!</p><label className={field}><input type="password" value={secret} onChange={(e) => setSecret(e.target.value)} placeholder="6 цифр" className="flex-1 bg-transparent outline-none tracking-widest text-center" maxLength={6} /></label><button onClick={handleSecret} className={primary}>Далее</button></div>}
           {step === 'password' && <div className="space-y-4"><h2 className="text-xl font-semibold text-center">Пароль</h2><label className={field}><input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Минимум 8 символов" className="flex-1 bg-transparent outline-none" /></label><button onClick={handlePassword} className={primary}>Далее</button></div>}
           {step === 'email' && <div className="space-y-4"><h2 className="text-xl font-semibold text-center">Почта</h2><label className={field}><input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="mail@example.com" className="flex-1 bg-transparent outline-none" /></label><button onClick={handleEmail} className={primary}>Зарегистрироваться</button></div>}
